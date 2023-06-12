@@ -40,7 +40,7 @@ To test the models run the following scripts: `evaluate_model.py` with the relev
 We added a trained model in the `bit_flip_model.pkl` file, with the size n=10.
 
 ### Results
-In the above figure, we show how the state size affects the success ratio of the different algorithms. </br>
+In the above figure, we show how the state size affects the success ratio of the different algorithms. (the x-axis of the figure should be the num of states) </br>
 As can be seen, using HER, allows us to overcome the binary sparse reward problem, and maintain high success rate even for very high state spaces. </br>
 This even works when compared to the normal DQN, with added Reward Shaping.
 <p align="center">
