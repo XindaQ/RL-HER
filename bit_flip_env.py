@@ -42,7 +42,8 @@ class BitFlipEnv:
                 done = False
             else:
                 done = True
-
+        
+        # set a simple changing references of the targets in the dynamic case we want to study 
         if self.dynamic:
             self.target = 1 - self.target                                           # change the target to oppo if dynamic
 
