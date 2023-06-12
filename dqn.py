@@ -21,7 +21,7 @@ class DQN(nn.Module):
         out = self.dropout(out)
         out = self.relu(out)
         # second layer: linear + dropout
-        # the output will be a array for each card
+        # the output will be a array for each actions, Q(s, ai) for all ai
         # the logit will be calculate after the modeling for the softmax
         out = self.hidden_to_output(out)
         out = self.dropout(out)
