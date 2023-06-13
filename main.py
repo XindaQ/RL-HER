@@ -11,14 +11,24 @@ import numpy as np
 
 
 def select_action(args, state, goal, actions_num, policy_net, steps_done, device):
+    # use this function to select the action from the Q function evaluation of DQN algorithm
+    # get a sample between 0 and 1, for next decision of using random or use policy
     sample = random.random()
+    # calculate the current eps
     eps_threshold = max(args.eps_end,
                         args.eps_start * (1 - steps_done / args.eps_decay) +
                         args.eps_end * (steps_done / args.eps_decay))
+    # get the actions
     if sample > eps_threshold:
+        # use with to ensure proper aqusition and release the resource
+        # make sure we do not record the gradients when we calculate the actions from Q function
         with torch.no_grad():
+            # the input the the (s, g), output is maximum of the Q value for all possible actions
+            # the max return a tuple (), of the maximum value and the position
+            # look at the max in second dim, since the first dim is batch
             return policy_net(torch.cat((state, goal), 1)).max(1)[1].view(1, 1)
     else:
+        # just return a random action for the one batch, with proper data type, the int / long type
         return torch.tensor([[random.randrange(actions_num)]], device=device, dtype=torch.long)
 
 
@@ -129,79 +139,121 @@ def train(args):
         # similiar to while(True):
         for t in count():
             # Select and perform an action
-            # get the action base on the Q function evaluation
+            # get the action base on the Q function evaluation, this is for 1-batch state
             action = select_action(args, state, goal, actions_num, policy_net, steps_done, device)
+            # get the value of the action, and send it into env to step
             next_state, reward, done = env.step(action.item())
-
+            
+            # get the old goal in advance
             old_goal = goal.clone()
 
             # In the dynamic goal case, the goal might change every step
+            # this is the changing target case, get the new goal / target
             goal = torch.tensor(env.target, device=device, dtype=torch.float).unsqueeze(0)
 
             # Next state to tensor
+            # convert the next state
             next_state = torch.tensor(next_state, device=device, dtype=torch.float).unsqueeze(0)
-
+            
+            # get the statistic updated
             steps_done += 1
             reset_target_cnt += 1
             episode_reward += reward
-
+            
+            # put them into tensor
             reward = torch.tensor([reward], device=device).unsqueeze(0)
 
             # Store the transition in memory
+            # put the transition into standard buffer
             if not (done and reward < 0):
                 episode_memory.append((state, action, next_state, reward, old_goal, goal))
 
             # Move to the next state
+            # update the old state to the current state
             state = next_state
 
             # Update the target network
-            if reset_target_cnt > args.target_update:
+            # update the target net if need
+            if reset_target_cnt > args.target_update:                   # freq of target update, set to be 500
                 reset_target_cnt = 0
+                # update / copy the model
                 target_net.load_state_dict(policy_net.state_dict())
 
             # Episode duration statistics
+            # check if one episode is already down
             if done:
                 episode_durations.append(t + 1)
+                # see the final step success or not, if fail, then put the whole buffer in a "fail" buffer
                 if reward < 0:
-                    # This is a failed trajectory
+                    # This is a failed trajectory, see if enough space, use a pointer to update
                     if len(failed_episodes) < failed_episodes_size:
                         failed_episodes.append(episode_memory)
                     else:
                         failed_episodes[failed_episodes_index] = episode_memory
                         failed_episodes_index = (failed_episodes_index + 1) % failed_episodes_size
+                # break the episode        
                 break
-
+        
+        # after one episode, we can go to deal with the replay and set the additional goals
         # Experience Replay
         for t in range(len(episode_memory)):
+            # get one transition from the memory, here the t is the current time step
             state, action, next_state, reward, old_goal, goal = episode_memory[t]
-
+            
+            # get the (s,g)
             state_memory = torch.cat((state, goal), 1)
+            # get the next (s,g)
             if torch.all(next_state == goal):
                 next_state_memory = None
             else:
                 next_state_memory = torch.cat((next_state, goal), 1)
-
+            
+            # put the transition which can be used for training into the replay buffer
             memory.push(state_memory, action, next_state_memory, reward)
-
+            
+            """
+            deal with the replay buffer for the HER, for each timestep we look after to create new goals
+            here the implementations is:
+            for each timestep, sample some new goal, and see include the current timestep in the new goal trajectory
+            in this way, the new goal don't have complete trajectory, but some sampled, discrete ones
+            this seems the original method for HER
+            this is a easier method which can fuse into the common replay buffer, but seems not very balance
+            it have higher change to reach the final states of the episode and thus take longer time
+            and it will garrenty to get a success state at the final end of the epoch
+            """
+            # I would suggest to also sample some accessable / reachable state, and update the whole trajectory before timestep
+            # and then put them in the replay buffer, maybe not that efficient
             #HER
             if args.HER:
+                # set limited new goals for the HER
                 for g in range(args.goals):
+                    # sample a timestep after or include the t (both include, please change to (t, len(episode_memory)-1) if error
                     future_goal = np.random.randint(t, len(episode_memory))
+                    # get the s' of the old transition, which is an accessable state
                     _, _, new_goal, _, _, _ = episode_memory[future_goal]
+                    # then, generate the new transition by using the changed goal, use the s in t step and s' in the future step
                     state_memory = torch.cat((state, new_goal), 1)
-                    if torch.all(next_state == new_goal):  # Done
+                  
+                    if torch.all(next_state == new_goal):  # Done           # if the s' in t is same as the new goal, then it finishes
                         next_state_memory = None
-                        reward = torch.zeros(1, 1)
+                        # change the reward (here noticing it just change one step near the goal position)
+                        reward = torch.zeros(1, 1)                          
                     else:
                         next_state_memory = torch.cat((next_state, new_goal), 1)
+                        # also change the reward, here it cannot reach the new goal in one step and get a invalid transition
                         reward = torch.zeros(1, 1) - 1.0
                     memory.push(state_memory, action, next_state_memory, reward)
-
+                    
+        """
+        this is the DHER for changing targets, this is outside the common replay buffer update
+        
+        """
         # DHER
         if args.DHER:
-            finish = False
-            for i_ep, failed_ep_i in enumerate(failed_episodes):
+            finish = False                                                      # set a finish flag
+            for i_ep, failed_ep_i in enumerate(failed_episodes):                # deal with the failed episodes and try to stitch other
                 for j_ep, failed_ep_j in enumerate(failed_episodes):
+                    # get every two trajectory combination
                     if i_ep == j_ep:
                         continue
                     for i_i, t_i in enumerate(failed_ep_i):
@@ -231,6 +283,7 @@ def train(args):
                         break
 
         # Perform one step of the optimization (on the target network)
+        # Perform some step of the network update (on the policy?)
         optimization_steps = 5
         loss = 0.0
         for _ in range(optimization_steps):
@@ -274,7 +327,7 @@ if __name__ == '__main__':
     parser.add_argument('--alpha', type=float, default=0.001, help='Alpha - Learning rate')             # learning rate
     parser.add_argument('--gamma', type=float, default=0.99, help='Gamma - discount factor')            # discount
     parser.add_argument('--target-update', type=int, default=500, help='Number of steps until updating target network')
-                                                                                                        # warming step
+                                                                                                        # target update frequency
     parser.add_argument('--reg-param', type=float, default=0, help='L1 regulatization parameter')       # network regulation for overfit
    
 
