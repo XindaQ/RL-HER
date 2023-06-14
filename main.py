@@ -256,34 +256,44 @@ def train(args):
                     # get every two trajectory combination
                     if i_ep == j_ep:
                         continue
+                    # then go to get two time-steps from the two diff trajectory
                     for i_i, t_i in enumerate(failed_ep_i):
                         for j_j, t_j in enumerate(failed_ep_j):
                             # Checks if the ith episode's next state is the same as the jth episode's next goal
+                            # Check if one of the experience state of (i) is actually the goal of other traj (j)
                             if torch.all(t_i[2] == t_j[5]):
-                                m = min(i_i, j_j)
+                                # the trajectory is: "state, action, next_state, reward, old_goal, goal = episode_memory[t]"
+                                # if the goal of (i) is found in (j), then try to rewrite the (i) goals,
+                                # to make it want merge into the (j)
+                                m = min(i_i, j_j)                                       # get the earlier timestep
+                                # rewrite all the goal and the reward before this timestep
                                 for t in range(m, -1, -1):
-                                    new_current_goal = failed_ep_j[j_j - t][4]
-                                    new_next_goal = failed_ep_j[j_j - t][5]
-                                    next_state = failed_ep_i[i_i - t][2]
-                                    if torch.all(next_state == new_next_goal):
+                                    new_current_goal = failed_ep_j[j_j - t][4]          # get the current goal of (j)
+                                    new_next_goal = failed_ep_j[j_j - t][5]             # get the next goal of (j)
+                                    next_state = failed_ep_i[i_i - t][2]                # get the next state of origianl (i)
+                                    if torch.all(next_state == new_next_goal): 
+                                        # if get to the target, then None for the next state
                                         next_state_memory = None
                                         reward = torch.zeros(1, 1)
                                     else:
+                                        # otherwise get a proper next state and reward
                                         next_state_memory = torch.cat((next_state, new_next_goal), 1)
                                         reward = torch.zeros(1, 1) - 1.0
                                     state_memory = torch.cat((failed_ep_i[i_i - t][0], new_current_goal), 1)
                                     action = failed_ep_i[i_i - t][1]
+                                    # put the new trajectory of the (i) with new goal and the reward into the replay buffer
                                     memory.push(state_memory, action, next_state_memory, reward)
                                 finish = True
                             if finish:
                                 break
                         if finish:
                             break
+                    # we just need to find one possible reachable goal in (j)s for one (i)
                     if finish:
                         break
 
         # Perform one step of the optimization (on the target network)
-        # Perform some step of the network update (on the policy?)
+        # Then, Perform some step of the network update (on the policy?)
         optimization_steps = 5
         loss = 0.0
         for _ in range(optimization_steps):
