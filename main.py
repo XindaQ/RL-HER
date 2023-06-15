@@ -33,19 +33,25 @@ def select_action(args, state, goal, actions_num, policy_net, steps_done, device
 
 
 def optimize_model(args, policy_net, target_net, optimizer, memory, device):
+    # use the transition from the replay buffer to update the Q-function
     # First check if there is an available batch
     if len(memory) < args.batch_size:
+        # skip if the replay is too small
         return 0
 
-    # Sample batch to learn net(from
+    # Sample batch transitions from the replay buffer to train the networks
     transitions = memory.sample(args.batch_size)
 
     # Transpose the batch
+    # make a dictionary from the raw data of transition (I just doubt why use dict, why not just list)
+    # use dict may let the data more readable
     batch = Transition(*zip(*transitions))
 
     # Compute a mask of non-final states and concatenate the batch elements
+    # get the intermediate trans, and make them to tensor, make a mask first
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                             batch.next_state)), device=device, dtype=torch.uint8)
+    # then get and concanate all the s, a, r, s'
     non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
     state_batch = torch.cat(batch.state, dim=0)
     action_batch = torch.cat(batch.action, dim=0)
@@ -53,16 +59,21 @@ def optimize_model(args, policy_net, target_net, optimizer, memory, device):
 
     # Compute Q(s_t, a) - the model computes Q(s_t),
     # Then, using gather, we select the columns of actions taken
+    # Compute the Q(s, a) for all a (a list of prob), 
+    # use torch.gather() to take the output Q-value of the current a， -> Q(s_t, a_t)
     state_action_values = policy_net(state_batch).gather(1, action_batch)
 
     # Compute V(s_{t+1}) for all next states.
+    # get the calculated Q from the max[Q(s_t+1)]
     next_state_values = torch.zeros((args.batch_size, 1), device=device)
     next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].unsqueeze(1).detach()
 
     # Compute the expected Q values
+    # updated the Q-function by using the bootstraping: Q(s,a) = r + gamma * max(Q(s_t+1, a_t+1) 
     expected_state_action_values = (next_state_values * args.gamma) + reward_batch.float()
 
     # Compute Huber loss
+    # train the Q-func to the target value, use smooth L1 loss and also add the regularization
     loss = torch.nn.functional.smooth_l1_loss(state_action_values, expected_state_action_values)
     if args.reg_param > 0:
         regularization = 0.0
@@ -71,11 +82,13 @@ def optimize_model(args, policy_net, target_net, optimizer, memory, device):
         loss += args.reg_param * regularization
 
     # Optimize the model
+    # Optimize the model base on the loss (get the grad and step one step)
     optimizer.zero_grad()
     loss.backward()
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
+    # finally return the loss for record data
     return loss.item()
 
 
@@ -291,28 +304,35 @@ def train(args):
                     # we just need to find one possible reachable goal in (j)s for one (i)
                     if finish:
                         break
-
+        
+        # after one episode
         # Perform one step of the optimization (on the target network)
-        # Then, Perform some step of the network update (on the policy?)
+        # Then, Perform some step of the network update (on the Q function), by using the replay buffer
         optimization_steps = 5
         loss = 0.0
         for _ in range(optimization_steps):
+            # go to update the Q-func, go to update the relevent network for RL
             loss += optimize_model(args, policy_net, target_net, optimizer, memory, device)
+        # get the averaged Q-func approx loss
         loss /= optimization_steps
 
         # Episodes statistics
+        # evaluate the model every 10 qpisodes
         if i_episode % 10 == 0 and i_episode != 0:
             print("Evaluation:")
             eval_reward, success_ratio = eval_model(model=policy_net, env=env, episodes=10, device=device)
             eval_mean_reward = np.mean(eval_reward)
             eval_reward_array.append(eval_mean_reward)
             success_ratio_array.append(success_ratio)
-
+        
+        # print out the date every 10 episodes
         print("Episode %d complete, episode duration = %d, loss = %.3f, reward = %d" %
               (i_episode, episode_durations[-1], loss, episode_reward))
-
+        
+        # save the model every 10 episodes
         torch.save(policy_net.state_dict(), 'bit_flip_model.pkl')
-
+    
+    # save the success_ratio after all the episode
     np.save("success_ratio.npy", success_ratio_array)
     print('Complete')
 
